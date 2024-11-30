@@ -1,0 +1,23 @@
+[package]
+name = "masir"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+winput = "0.2"
+color-eyre = "0.6"
+paste = "1"
+ctrlc = "3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+windows-core = "0.58"
+dirs = "5"
+clap = { version = "4", features = ["derive"] }
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input",
+    "Win32_UI_Input_KeyboardAndMouse",
+]
