@@ -144,8 +144,9 @@ jobs:
             checksums.txt
             *.zip
             *.msi
-      - if: startsWith(github.ref, 'refs/tags/v')
-        uses: vedantmgoyal2009/winget-releaser@v2
-        with:
-          identifier: LGUG2Z.masir
-          token: ${{ secrets.WINGET_TOKEN }}
+# Can be uncommented after the first manual release
+#      - if: startsWith(github.ref, 'refs/tags/v')
+#        uses: vedantmgoyal2009/winget-releaser@v2
+#        with:
+#          identifier: LGUG2Z.masir
+#          token: ${{ secrets.WINGET_TOKEN }}
