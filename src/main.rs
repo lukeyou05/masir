@@ -20,8 +20,12 @@ use windows::Win32::UI::WindowsAndMessaging::SWP_SHOWWINDOW;
 use winput::message_loop;
 use winput::message_loop::Event;
 
-const CLASS_ALLOWLIST: [&str; 1] = [
-    "Chrome_RenderWidgetHostHWND", // gross electron apps
+const CLASS_ALLOWLIST: [&str; 5] = [
+    "Chrome_RenderWidgetHostHWND",                 // gross electron apps
+    "Microsoft.UI.Content.DesktopChildSiteBridge", // windows explorer main panel
+    "SysTreeView32",                               // windows explorer side panel
+    "TITLE_BAR_SCAFFOLDING_WINDOW_CLASS",          // windows explorer side panel
+    "DirectUIHWND",                                // windows explorer after interaction
 ];
 
 const CLASS_BLOCKLIST: [&str; 5] = [
@@ -122,21 +126,39 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                         let mut should_raise = false;
 
                         // step one: test against known classes
-                        if let Ok(class) = real_window_class_w(cursor_pos_hwnd) {
+                        if let (Ok(cursor_pos_class), Ok(foreground_class)) = (
+                            real_window_class_w(cursor_pos_hwnd),
+                            real_window_class_w(foreground_hwnd),
+                        ) {
+                            // windows explorer related focus loop weirdness fixes in this block
+                            {
+                                if cursor_pos_class == "DirectUIHWND"
+                                    && foreground_class == "CabinetWClass"
+                                {
+                                    continue;
+                                }
+
+                                if cursor_pos_class == "Microsoft.UI.Content.DesktopChildSiteBridge"
+                                    && foreground_class == "CabinetWClass"
+                                {
+                                    continue;
+                                }
+                            }
+
                             // fail fast, exit this iteration of the loop and avoid any processing
                             // if we hit a blocklist entry
-                            if CLASS_BLOCKLIST.contains(&&*class) {
-                                tracing::debug!("window class {class} is blocklisted");
+                            if CLASS_BLOCKLIST.contains(&&*cursor_pos_class) {
+                                tracing::debug!("window class {cursor_pos_class} is blocklisted");
                                 continue;
                             }
 
-                            if CLASS_ALLOWLIST.contains(&&*class) {
-                                tracing::debug!("window class {class} is allowlisted");
+                            if CLASS_ALLOWLIST.contains(&&*cursor_pos_class) {
+                                tracing::debug!("window class {cursor_pos_class} is allowlisted");
                                 should_raise = true;
                             }
 
                             if !should_raise {
-                                tracing::trace!("window class is {class}");
+                                tracing::trace!("window class is {cursor_pos_class}");
                             }
                         }
 
