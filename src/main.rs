@@ -10,12 +10,14 @@ use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::Input::KeyboardAndMouse::SendInput;
 use windows::Win32::UI::Input::KeyboardAndMouse::INPUT;
 use windows::Win32::UI::Input::KeyboardAndMouse::INPUT_MOUSE;
+use windows::Win32::UI::WindowsAndMessaging::GetAncestor;
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 use windows::Win32::UI::WindowsAndMessaging::RealGetWindowClassW;
 use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
 use windows::Win32::UI::WindowsAndMessaging::SetWindowPos;
 use windows::Win32::UI::WindowsAndMessaging::WindowFromPoint;
+use windows::Win32::UI::WindowsAndMessaging::GA_ROOT;
 use windows::Win32::UI::WindowsAndMessaging::HWND_TOP;
 use windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE;
 use windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE;
@@ -268,13 +270,32 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                             }
                         }
 
-                        if should_raise {
-                            if should_cache_eligibility {
-                                // ensure we cache eligibility to avoid syscalls and tests next time
-                                eligibility_cache.insert(cursor_pos_hwnd, true);
-                            }
+                        if should_cache_eligibility {
+                            // ensure we cache eligibility to avoid syscalls and tests next time
+                            eligibility_cache.insert(cursor_pos_hwnd, true);
+                        }
 
-                            match raise_and_focus_window(cursor_pos_hwnd) {
+                        if should_raise {
+                            // cursor_pos_hwnd might be a child window, but we want to raise
+                            // top-level windows, so we use GetAncestor to find it
+                            let cursor_pos_top_level_hwnd =
+                                match unsafe { GetAncestor(HWND(cursor_pos_hwnd as _), GA_ROOT) } {
+                                    hwnd if hwnd.is_invalid() => {
+                                        // i'm not sure what would make this invalid tbh, but check
+                                        // just in case. maybe if cursor_pos_hwnd is already top-level?
+                                        tracing::info!("invalid top_level_hwnd {hwnd:?}");
+                                        continue;
+                                    }
+                                    hwnd => hwnd.0 as isize,
+                                };
+
+                            // insert this pair because they basically refer to the same window
+                            //
+                            // TODO idk if we should check if this key-value pair exists first
+                            // before trying to insert it?
+                            hwnd_pair_cache.insert(cursor_pos_hwnd, cursor_pos_top_level_hwnd);
+
+                            match raise_and_focus_window(cursor_pos_top_level_hwnd) {
                                 Ok(_) => {
                                     tracing::info!("raised hwnd {cursor_pos_hwnd}");
                                 }
@@ -393,6 +414,7 @@ pub fn raise_and_focus_window(hwnd: isize) -> Result<()> {
         // foreground lock check
         SendInput(&event, size_of::<INPUT>() as i32);
         // Error ignored, as the operation is not always necessary.
+
         let _ = SetWindowPos(
             HWND(as_ptr!(hwnd)),
             HWND_TOP,
