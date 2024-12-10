@@ -129,6 +129,8 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
         let mut cache_instantiation_time = Instant::now();
         let max_cache_age = Duration::from_secs(60) * 10; // 10 minutes
 
+        let mut old_cursor_pos = [0, 0];
+
         loop {
             // clear our caches every 10 minutes
             if cache_instantiation_time.elapsed() > max_cache_age {
@@ -141,7 +143,24 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                 cache_instantiation_time = Instant::now();
             }
 
-            if let Event::MouseMoveRelative { .. } = receiver.next_event() {
+            if let Event::MouseMoveRelative {
+                x: new_cursor_pos_x,
+                y: new_cursor_pos_y,
+            } = receiver.next_event()
+            {
+                // The MouseMoveRelative event can be sent when focus changes even if the cursor
+                // position hasn't, which messes with some apps like Flow Launcher. So, we check
+                // here to see if it has actually changed
+                //
+                // @LGUG2Z whether you implement this or not is totally up to you because I'm aware
+                // it's a bit of a janky solution. Perhaps there's a better way?
+                if old_cursor_pos[0] == new_cursor_pos_x && old_cursor_pos[1] == new_cursor_pos_y {
+                    continue;
+                }
+
+                old_cursor_pos[0] = new_cursor_pos_x;
+                old_cursor_pos[1] = new_cursor_pos_y;
+
                 if let (Ok(cursor_pos_hwnd), Ok(foreground_hwnd)) =
                     (window_at_cursor_pos(), foreground_window())
                 {
