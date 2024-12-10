@@ -18,6 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
 use windows::Win32::UI::WindowsAndMessaging::SetWindowPos;
 use windows::Win32::UI::WindowsAndMessaging::WindowFromPoint;
 use windows::Win32::UI::WindowsAndMessaging::GA_ROOT;
+use windows::Win32::UI::WindowsAndMessaging::GET_ANCESTOR_FLAGS;
 use windows::Win32::UI::WindowsAndMessaging::HWND_TOP;
 use windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE;
 use windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE;
@@ -129,7 +130,8 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
         let mut cache_instantiation_time = Instant::now();
         let max_cache_age = Duration::from_secs(60) * 10; // 10 minutes
 
-        let mut old_cursor_pos = [0, 0];
+        let mut old_cursor_pos_x = 0;
+        let mut old_cursor_pos_y = 0;
 
         loop {
             // clear our caches every 10 minutes
@@ -148,18 +150,18 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                 y: new_cursor_pos_y,
             } = receiver.next_event()
             {
-                // The MouseMoveRelative event can be sent when focus changes even if the cursor
-                // position hasn't, which messes with some apps like Flow Launcher. So, we check
-                // here to see if it has actually changed
+                // The MouseMoveRelative event can be sent when the focused window changes even if
+                // the cursor position hasn't, which messes with some apps like Flow Launcher. So,
+                // we check here to verify it has actually changed.
                 //
                 // @LGUG2Z whether you implement this or not is totally up to you because I'm aware
                 // it's a bit of a janky solution. Perhaps there's a better way?
-                if old_cursor_pos[0] == new_cursor_pos_x && old_cursor_pos[1] == new_cursor_pos_y {
+                if new_cursor_pos_x == old_cursor_pos_x && new_cursor_pos_y == old_cursor_pos_y {
                     continue;
                 }
 
-                old_cursor_pos[0] = new_cursor_pos_x;
-                old_cursor_pos[1] = new_cursor_pos_y;
+                old_cursor_pos_x = new_cursor_pos_x;
+                old_cursor_pos_y = new_cursor_pos_y;
 
                 if let (Ok(cursor_pos_hwnd), Ok(foreground_hwnd)) =
                     (window_at_cursor_pos(), foreground_window())
@@ -295,33 +297,22 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                         }
 
                         if should_raise {
-                            // cursor_pos_hwnd might be a child window, but we want to raise
-                            // top-level windows, so we use GetAncestor to find it
-                            let cursor_pos_top_level_hwnd =
-                                match unsafe { GetAncestor(HWND(cursor_pos_hwnd as _), GA_ROOT) } {
-                                    hwnd if hwnd.is_invalid() => {
-                                        // i'm not sure what would make this invalid tbh, but check
-                                        // just in case. maybe if cursor_pos_hwnd is already top-level?
-                                        tracing::info!("invalid top_level_hwnd {hwnd:?}");
-                                        continue;
+                            // get the top-level window under the cursor
+                            if let Ok(cursor_pos_top_level_hwnd) =
+                                get_ancestor(cursor_pos_hwnd, GA_ROOT)
+                            {
+                                // insert this pair because they basically refer to the same window
+                                hwnd_pair_cache.insert(cursor_pos_hwnd, cursor_pos_top_level_hwnd);
+
+                                match raise_and_focus_window(cursor_pos_top_level_hwnd) {
+                                    Ok(_) => {
+                                        tracing::info!("raised hwnd {cursor_pos_top_level_hwnd}");
                                     }
-                                    hwnd => hwnd.0 as isize,
-                                };
-
-                            // insert this pair because they basically refer to the same window
-                            //
-                            // TODO idk if we should check if this key-value pair exists first
-                            // before trying to insert it?
-                            hwnd_pair_cache.insert(cursor_pos_hwnd, cursor_pos_top_level_hwnd);
-
-                            match raise_and_focus_window(cursor_pos_top_level_hwnd) {
-                                Ok(_) => {
-                                    tracing::info!("raised hwnd {cursor_pos_hwnd}");
-                                }
-                                Err(error) => {
-                                    tracing::error!(
-                                        "failed to raise hwnd {cursor_pos_hwnd}: {error}"
-                                    );
+                                    Err(error) => {
+                                        tracing::error!(
+                                            "failed to raise hwnd {cursor_pos_top_level_hwnd}: {error}"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -403,6 +394,11 @@ impl<T> ProcessWindowsCrateResult<T> for WindowsCrateResult<T> {
         }
     }
 }
+
+fn get_ancestor(hwnd: isize, gaflags: GET_ANCESTOR_FLAGS) -> Result<isize> {
+    unsafe { GetAncestor(HWND(as_ptr!(hwnd)), gaflags) }.process()
+}
+
 pub fn window_from_point(point: POINT) -> Result<isize> {
     unsafe { WindowFromPoint(point) }.process()
 }
