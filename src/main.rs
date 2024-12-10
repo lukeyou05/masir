@@ -291,12 +291,12 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                             }
                         }
 
-                        if should_cache_eligibility {
-                            // ensure we cache eligibility to avoid syscalls and tests next time
-                            eligibility_cache.insert(cursor_pos_hwnd, true);
-                        }
-
                         if should_raise {
+                            if should_cache_eligibility {
+                                // ensure we cache eligibility to avoid syscalls and tests next time
+                                eligibility_cache.insert(cursor_pos_hwnd, true);
+                            }
+
                             // get the top-level window under the cursor
                             if let Ok(cursor_pos_top_level_hwnd) =
                                 get_ancestor(cursor_pos_hwnd, GA_ROOT)
