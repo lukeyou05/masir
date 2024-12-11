@@ -38,6 +38,11 @@ const CLASS_BLOCKLIST: [&str; 5] = [
     "Windows.UI.Core.CoreWindow", // start menu
 ];
 
+const CLASS_PAUSELIST: [&str; 2] = [
+    "XamlExplorerHostIslandWindow", // task switcher
+    "ForegroundStaging",            // also task switcher
+];
+
 #[derive(Parser)]
 #[clap(author, about, version)]
 struct Opts {
@@ -175,6 +180,7 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
 
                         // check our class cache to avoid syscalls
                         let mut cursor_pos_class = class_cache.get(&cursor_pos_hwnd).cloned();
+                        let mut foreground_class = class_cache.get(&foreground_hwnd).cloned();
 
                         // make syscalls if necessary and populate the class cache
                         match &cursor_pos_class {
@@ -188,6 +194,28 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                                 tracing::debug!(
                                     "hwnd {cursor_pos_hwnd} class was found in the cache: {class}"
                                 );
+                            }
+                        }
+
+                        // make syscalls if necessary and populate the class cache
+                        match &foreground_class {
+                            None => {
+                                if let Ok(class) = real_window_class_w(foreground_hwnd) {
+                                    class_cache.insert(foreground_hwnd, class.clone());
+                                    foreground_class = Some(class);
+                                }
+                            }
+                            Some(class) => {
+                                tracing::debug!(
+                                    "hwnd {foreground_hwnd} class was found in the cache: {class}"
+                                );
+                            }
+                        }
+
+                        // check if the foreground window is in the pause list (i.e. task switcher)
+                        if let Some(class) = foreground_class {
+                            if CLASS_PAUSELIST.contains(&class.as_str()) {
+                                continue;
                             }
                         }
 
