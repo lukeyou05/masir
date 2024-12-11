@@ -30,7 +30,8 @@ use windows::Win32::UI::WindowsAndMessaging::WS_EX_TOOLWINDOW;
 use winput::message_loop;
 use winput::message_loop::Event;
 
-const CLASS_BLOCKLIST: [&str; 5] = [
+// ignore cursor_pos_hwnd if it is one of these classes
+const CLASS_IGNORELIST: [&str; 5] = [
     "SHELLDLL_DefView",           // desktop window
     "Shell_TrayWnd",              // tray
     "TrayNotifyWnd",              // tray
@@ -38,6 +39,7 @@ const CLASS_BLOCKLIST: [&str; 5] = [
     "Windows.UI.Core.CoreWindow", // start menu
 ];
 
+// prevent masir from raising any windows when the foreground window is one of these classes
 const CLASS_PAUSELIST: [&str; 2] = [
     "XamlExplorerHostIslandWindow", // task switcher
     "ForegroundStaging",            // also task switcher
@@ -156,8 +158,7 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                 // the cursor position hasn't, which messes with some apps like Flow Launcher. So,
                 // we check here to verify it has actually changed.
                 //
-                // @LGUG2Z whether you implement this or not is totally up to you because I'm aware
-                // it's a bit of a janky solution. Perhaps there's a better way?
+                // TODO this is a janky ass solution
                 if new_cursor_pos_x == old_cursor_pos_x && new_cursor_pos_y == old_cursor_pos_y {
                     continue;
                 }
@@ -227,8 +228,30 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                                     "hwnd {cursor_pos_hwnd} was found as eligible in the cache"
                                 );
                             }
+                        } else if let Some(hwnds) = &hwnds {
+                            // if the eligibility for this hwnd isn't cached, and if 'hwnds' is a
+                            // valid file, then check against the hwnds in there
+                            //
+                            // supposedly, this should "ensure that only windows managed by the
+                            // tiling window manager are eligible to be focused"
+                            //
+                            // TODO tbh i have not tested this part of the code at all (notice how
+                            // i have the 'hwnds' path commented out at the top of the file)...
+                            // also, what happens if the file is valid, but hasn't been updated
+                            // because the user isn't currently running that twm?
+
+                            if let Ok(raw_hwnds) = std::fs::read_to_string(hwnds) {
+                                if raw_hwnds.contains(&cursor_pos_hwnd.to_string()) {
+                                    tracing::debug!(
+                                        "hwnd {cursor_pos_hwnd} was found in {}",
+                                        hwnds.display()
+                                    );
+                                    eligibility_cache.insert(cursor_pos_hwnd, true);
+                                    should_raise = true;
+                                }
+                            }
                         } else {
-                            // if the eligibility for this hwnd isn't cached, then do some tests
+                            // otherwise, do some tests
 
                             // step one: traverse the window tree to get the top-level/parent hwnd
                             // of the given cursor_pos_hwnd, and check its window styles
@@ -242,29 +265,14 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                                 Err(_) => true,
                             };
 
-                            // step two: test against known classes in the block list
-                            let is_in_block_list = match cursor_pos_class {
-                                Some(class) => CLASS_BLOCKLIST.contains(&class.as_str()),
+                            // step two: test against known classes in the ignore list
+                            let is_in_ignore_list = match cursor_pos_class {
+                                Some(class) => CLASS_IGNORELIST.contains(&class.as_str()),
                                 None => true,
                             };
 
-                            let is_eligible = !has_filtered_style && !is_in_block_list;
+                            let is_eligible = !has_filtered_style && !is_in_ignore_list;
                             eligibility_cache.insert(cursor_pos_hwnd, is_eligible);
-
-                            // step three: if available, test against known hwnds
-                            if !should_raise {
-                                if let Some(hwnds) = &hwnds {
-                                    if let Ok(raw_hwnds) = std::fs::read_to_string(hwnds) {
-                                        if raw_hwnds.contains(&cursor_pos_hwnd.to_string()) {
-                                            tracing::debug!(
-                                                "hwnd {cursor_pos_hwnd} was found in {}",
-                                                hwnds.display()
-                                            );
-                                            should_raise = true;
-                                        }
-                                    }
-                                }
-                            }
                         }
 
                         if should_raise {
@@ -273,12 +281,12 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                                 match raise_and_focus_window(*top_level_hwnd) {
                                     Ok(_) => {
                                         tracing::info!(
-                                            "raised hwnd {cursor_pos_hwnd} {top_level_hwnd}"
+                                            "raised hwnd: {top_level_hwnd:#x}; cursor_pos_hwnd: {cursor_pos_hwnd:#x}"
                                         );
                                     }
                                     Err(error) => {
                                         tracing::error!(
-                                            "failed to raise hwnd {top_level_hwnd}: {error}"
+                                            "failed to raise hwnd {top_level_hwnd:#x}: {error}"
                                         );
                                     }
                                 }
@@ -364,7 +372,7 @@ impl<T> ProcessWindowsCrateResult<T> for WindowsCrateResult<T> {
 }
 
 // This method of checking window styles and caching HWNDs can fail if a window changes its window
-// styles at some point after caching, but I'm not going to worry about that for now
+// styles at some point after caching, but I'm not going to worry about that for now TODO
 fn has_filtered_style(hwnd: isize) -> bool {
     //let style = unsafe { GetWindowLongW(HWND(as_ptr!(hwnd)), GWL_STYLE) as u32 };
     let ex_style = unsafe { GetWindowLongW(HWND(as_ptr!(hwnd)), GWL_EXSTYLE) as u32 };
