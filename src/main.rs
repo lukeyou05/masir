@@ -13,26 +13,22 @@ use windows::Win32::UI::Input::KeyboardAndMouse::INPUT_MOUSE;
 use windows::Win32::UI::WindowsAndMessaging::GetAncestor;
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+use windows::Win32::UI::WindowsAndMessaging::GetWindowLongW;
 use windows::Win32::UI::WindowsAndMessaging::RealGetWindowClassW;
 use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
 use windows::Win32::UI::WindowsAndMessaging::SetWindowPos;
 use windows::Win32::UI::WindowsAndMessaging::WindowFromPoint;
 use windows::Win32::UI::WindowsAndMessaging::GA_ROOT;
 use windows::Win32::UI::WindowsAndMessaging::GET_ANCESTOR_FLAGS;
+use windows::Win32::UI::WindowsAndMessaging::GWL_EXSTYLE;
 use windows::Win32::UI::WindowsAndMessaging::HWND_TOP;
 use windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE;
 use windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE;
 use windows::Win32::UI::WindowsAndMessaging::SWP_SHOWWINDOW;
+use windows::Win32::UI::WindowsAndMessaging::WS_EX_NOACTIVATE;
+use windows::Win32::UI::WindowsAndMessaging::WS_EX_TOOLWINDOW;
 use winput::message_loop;
 use winput::message_loop::Event;
-
-const CLASS_ALLOWLIST: [&str; 5] = [
-    "Chrome_RenderWidgetHostHWND",                 // gross electron apps
-    "Microsoft.UI.Content.DesktopChildSiteBridge", // windows explorer main panel
-    "SysTreeView32",                               // windows explorer side panel
-    "TITLE_BAR_SCAFFOLDING_WINDOW_CLASS",          // windows explorer title bar
-    "DirectUIHWND",                                // windows explorer after interaction
-];
 
 const CLASS_BLOCKLIST: [&str; 5] = [
     "SHELLDLL_DefView",           // desktop window
@@ -57,8 +53,9 @@ fn main() -> Result<()> {
         None => {
             let hwnds: PathBuf = dirs::data_local_dir()
                 .expect("there is no local data directory")
-                .join("komorebi")
-                .join("komorebi.hwnd.json");
+                .join("komorebi");
+            // FOR NOW TEST WITHOUT THE KOMOREBI HWNDs LIST
+            //.join("komorebi.hwnd.json");
 
             // TODO: We can add checks for other window managers here
 
@@ -175,11 +172,9 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                         }
 
                         let mut should_raise = false;
-                        let mut should_cache_eligibility = false;
 
                         // check our class cache to avoid syscalls
                         let mut cursor_pos_class = class_cache.get(&cursor_pos_hwnd).cloned();
-                        let mut foreground_class = class_cache.get(&foreground_hwnd).cloned();
 
                         // make syscalls if necessary and populate the class cache
                         match &cursor_pos_class {
@@ -196,95 +191,48 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                             }
                         }
 
-                        // make syscalls if necessary and populate the class cache
-                        match &foreground_class {
-                            None => {
-                                if let Ok(class) = real_window_class_w(foreground_hwnd) {
-                                    class_cache.insert(foreground_hwnd, class.clone());
-                                    foreground_class = Some(class);
-                                }
-                            }
-                            Some(class) => {
+                        // check our eligibility cache
+                        if let Some(eligible) = eligibility_cache.get(&cursor_pos_hwnd) {
+                            if *eligible {
+                                should_raise = true;
                                 tracing::debug!(
-                                    "hwnd {foreground_hwnd} class was found in the cache: {class}"
+                                    "hwnd {cursor_pos_hwnd} was found as eligible in the cache"
                                 );
                             }
-                        }
-
-                        if let (Some(cursor_pos_class), Some(foreground_class)) =
-                            (cursor_pos_class, foreground_class)
-                        {
-                            // windows explorer fixes - populate the hwnd pair cache if necessary
-                            {
-                                if cursor_pos_class == "DirectUIHWND"
-                                    && foreground_class == "CabinetWClass"
-                                {
-                                    hwnd_pair_cache.insert(cursor_pos_hwnd, foreground_hwnd);
-                                    continue;
-                                }
-
-                                if cursor_pos_class == "Microsoft.UI.Content.DesktopChildSiteBridge"
-                                    && foreground_class == "CabinetWClass"
-                                {
-                                    hwnd_pair_cache.insert(cursor_pos_hwnd, foreground_hwnd);
-                                    continue;
-                                }
-                            }
-
-                            // steam fixes - populate the hwnd pair cache if necessary
-                            {
-                                if cursor_pos_class == "Chrome_RenderWidgetHostHWND"
-                                    && foreground_class == "SDL_app"
-                                {
-                                    hwnd_pair_cache.insert(cursor_pos_hwnd, foreground_hwnd);
-                                    continue;
-                                }
-                            }
-
-                            // check our eligibility cache
-                            if let Some(eligible) = eligibility_cache.get(&cursor_pos_hwnd) {
-                                if *eligible {
-                                    should_raise = true;
-                                    tracing::debug!(
-                                        "hwnd {cursor_pos_hwnd} was found as eligible in the cache"
-                                    );
-                                }
-                            } else {
-                                should_cache_eligibility = true;
-                            }
-
+                        } else {
                             // if the eligibility for this hwnd isn't cached, then do some tests
+
+                            // step one: traverse the window tree to get the top-level/parent hwnd
+                            // of the given cursor_pos_hwnd, and check its window styles
+                            let has_filtered_style = match get_ancestor(cursor_pos_hwnd, GA_ROOT) {
+                                Ok(hwnd) => {
+                                    // insert this pair because they refer to the same window
+                                    hwnd_pair_cache.insert(cursor_pos_hwnd, hwnd);
+
+                                    has_filtered_style(hwnd)
+                                }
+                                Err(_) => true,
+                            };
+
+                            // step two: test against known classes in the block list
+                            let is_in_block_list = match cursor_pos_class {
+                                Some(class) => CLASS_BLOCKLIST.contains(&class.as_str()),
+                                None => true,
+                            };
+
+                            let cache_as_eligible = !has_filtered_style && !is_in_block_list;
+                            eligibility_cache.insert(cursor_pos_hwnd, cache_as_eligible);
+
+                            // step three: if available, test against known hwnds
                             if !should_raise {
-                                // step one: test against known classes
-                                if CLASS_BLOCKLIST.contains(&cursor_pos_class.as_str()) {
-                                    tracing::debug!(
-                                        "window class {cursor_pos_class} is blocklisted"
-                                    );
-                                    continue;
-                                }
-
-                                if CLASS_ALLOWLIST.contains(&cursor_pos_class.as_str()) {
-                                    tracing::debug!(
-                                        "window class {cursor_pos_class} is allowlisted"
-                                    );
-                                    should_raise = true;
-                                }
-
-                                if !should_raise {
-                                    tracing::trace!("window class is {cursor_pos_class}");
-                                }
-
-                                // step two: if available, test against known hwnds
-                                if !should_raise {
-                                    if let Some(hwnds) = &hwnds {
-                                        if let Ok(raw_hwnds) = std::fs::read_to_string(hwnds) {
-                                            if raw_hwnds.contains(&cursor_pos_hwnd.to_string()) {
-                                                tracing::debug!(
-                                                    "hwnd {cursor_pos_hwnd} was found in {}",
-                                                    hwnds.display()
-                                                );
-                                                should_raise = true;
-                                            }
+                                if let Some(hwnds) = &hwnds {
+                                    if let Ok(raw_hwnds) = std::fs::read_to_string(hwnds) {
+                                        if raw_hwnds.contains(&cursor_pos_hwnd.to_string()) {
+                                            tracing::debug!(
+                                                "hwnd {cursor_pos_hwnd} was found in {}",
+                                                hwnds.display()
+                                            );
+                                            should_raise = true;
                                         }
                                     }
                                 }
@@ -292,25 +240,17 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                         }
 
                         if should_raise {
-                            if should_cache_eligibility {
-                                // ensure we cache eligibility to avoid syscalls and tests next time
-                                eligibility_cache.insert(cursor_pos_hwnd, true);
-                            }
-
                             // get the top-level window under the cursor
-                            if let Ok(cursor_pos_top_level_hwnd) =
-                                get_ancestor(cursor_pos_hwnd, GA_ROOT)
-                            {
-                                // insert this pair because they basically refer to the same window
-                                hwnd_pair_cache.insert(cursor_pos_hwnd, cursor_pos_top_level_hwnd);
-
-                                match raise_and_focus_window(cursor_pos_top_level_hwnd) {
+                            if let Some(top_level_hwnd) = hwnd_pair_cache.get(&cursor_pos_hwnd) {
+                                match raise_and_focus_window(*top_level_hwnd) {
                                     Ok(_) => {
-                                        tracing::info!("raised hwnd {cursor_pos_top_level_hwnd}");
+                                        tracing::info!(
+                                            "raised hwnd {cursor_pos_hwnd} {top_level_hwnd}"
+                                        );
                                     }
                                     Err(error) => {
                                         tracing::error!(
-                                            "failed to raise hwnd {cursor_pos_top_level_hwnd}: {error}"
+                                            "failed to raise hwnd {top_level_hwnd}: {error}"
                                         );
                                     }
                                 }
@@ -393,6 +333,15 @@ impl<T> ProcessWindowsCrateResult<T> for WindowsCrateResult<T> {
             Err(error) => Err(error.into()),
         }
     }
+}
+
+// This method of checking window styles and caching HWNDs can fail if a window changes its window
+// styles at some point after caching, but I'm not going to worry about that for now
+fn has_filtered_style(hwnd: isize) -> bool {
+    //let style = unsafe { GetWindowLongW(HWND(as_ptr!(hwnd)), GWL_STYLE) as u32 };
+    let ex_style = unsafe { GetWindowLongW(HWND(as_ptr!(hwnd)), GWL_EXSTYLE) as u32 };
+
+    ex_style & WS_EX_TOOLWINDOW.0 != 0 || ex_style & WS_EX_NOACTIVATE.0 != 0
 }
 
 fn get_ancestor(hwnd: isize, gaflags: GET_ANCESTOR_FLAGS) -> Result<isize> {
