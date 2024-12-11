@@ -48,6 +48,9 @@ const CLASS_PAUSELIST: [&str; 2] = [
 #[derive(Parser)]
 #[clap(author, about, version)]
 struct Opts {
+    /// Enable komorebi integration and use its HWNDs file
+    #[clap(long)]
+    komorebi: bool,
     /// Path to a file with known focus-able HWNDs (e.g. komorebi.hwnd.json)
     #[clap(long)]
     hwnds: Option<PathBuf>,
@@ -58,19 +61,19 @@ fn main() -> Result<()> {
 
     let hwnds = match opts.hwnds {
         None => {
-            let hwnds: PathBuf = dirs::data_local_dir()
-                .expect("there is no local data directory")
-                .join("komorebi");
-            // FOR NOW TEST WITHOUT THE KOMOREBI HWNDs LIST
-            //.join("komorebi.hwnd.json");
-
             // TODO: We can add checks for other window managers here
-
-            if hwnds.is_file() {
-                Some(hwnds)
+            let hwnds_option: Option<PathBuf> = if opts.komorebi {
+                Some(
+                    dirs::data_local_dir()
+                        .expect("there is no local data directory")
+                        .join("komorebi")
+                        .join("komorebi.hwnd.json"),
+                )
             } else {
                 None
-            }
+            };
+
+            hwnds_option.filter(|hwnds| hwnds.is_file())
         }
         Some(hwnds) => {
             if hwnds.is_file() {
@@ -234,20 +237,21 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                             //
                             // supposedly, this should "ensure that only windows managed by the
                             // tiling window manager are eligible to be focused"
-                            //
-                            // TODO tbh i have not tested this part of the code at all (notice how
-                            // i have the 'hwnds' path commented out at the top of the file)...
-                            // also, what happens if the file is valid, but hasn't been updated
-                            // because the user isn't currently running that twm?
 
                             if let Ok(raw_hwnds) = std::fs::read_to_string(hwnds) {
-                                if raw_hwnds.contains(&cursor_pos_hwnd.to_string()) {
-                                    tracing::debug!(
-                                        "hwnd {cursor_pos_hwnd} was found in {}",
-                                        hwnds.display()
-                                    );
-                                    eligibility_cache.insert(cursor_pos_hwnd, true);
-                                    should_raise = true;
+                                if let Ok(top_level_hwnd) = get_ancestor(cursor_pos_hwnd, GA_ROOT) {
+                                    if raw_hwnds.contains(&cursor_pos_hwnd.to_string())
+                                        || raw_hwnds.contains(&top_level_hwnd.to_string())
+                                    {
+                                        tracing::debug!(
+                                            "hwnd {cursor_pos_hwnd} was found in {}",
+                                            hwnds.display()
+                                        );
+
+                                        hwnd_pair_cache.insert(cursor_pos_hwnd, top_level_hwnd);
+                                        eligibility_cache.insert(cursor_pos_hwnd, true);
+                                        should_raise = true;
+                                    }
                                 }
                             }
                         } else {
