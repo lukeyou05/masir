@@ -220,8 +220,8 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                                 None => true,
                             };
 
-                            let cache_as_eligible = !has_filtered_style && !is_in_block_list;
-                            eligibility_cache.insert(cursor_pos_hwnd, cache_as_eligible);
+                            let is_eligible = !has_filtered_style && !is_in_block_list;
+                            eligibility_cache.insert(cursor_pos_hwnd, is_eligible);
 
                             // step three: if available, test against known hwnds
                             if !should_raise {
