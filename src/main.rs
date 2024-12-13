@@ -29,6 +29,7 @@ use windows::Win32::UI::WindowsAndMessaging::WS_EX_NOACTIVATE;
 use windows::Win32::UI::WindowsAndMessaging::WS_EX_TOOLWINDOW;
 use winput::message_loop;
 use winput::message_loop::Event;
+use winput::Action;
 
 // ignore cursor_pos_hwnd if it is one of these classes
 const CLASS_IGNORELIST: [&str; 5] = [
@@ -133,12 +134,13 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
         let mut eligibility_cache = HashMap::new();
         let mut class_cache: HashMap<isize, String> = HashMap::new();
         let mut hwnd_pair_cache: HashMap<isize, isize> = HashMap::new();
+        let mut top_level_hwnd_cache: HashMap<isize, isize> = HashMap::new();
 
         let mut cache_instantiation_time = Instant::now();
         let max_cache_age = Duration::from_secs(60) * 10; // 10 minutes
 
-        let mut old_cursor_pos_x = 0;
-        let mut old_cursor_pos_y = 0;
+        let mut old_cursor_pos = (0, 0);
+        let mut is_mouse_down = false;
 
         loop {
             // clear our caches every 10 minutes
@@ -148,31 +150,51 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                 eligibility_cache = HashMap::new();
                 class_cache = HashMap::new();
                 hwnd_pair_cache = HashMap::new();
+                top_level_hwnd_cache = HashMap::new();
 
                 cache_instantiation_time = Instant::now();
             }
 
-            if let Event::MouseMoveRelative {
-                x: new_cursor_pos_x,
-                y: new_cursor_pos_y,
-            } = receiver.next_event()
-            {
-                // The MouseMoveRelative event can be sent when the focused window changes even if
-                // the cursor position hasn't, which messes with some apps like Flow Launcher. So,
-                // we check here to verify it has actually changed.
-                //
-                // TODO this is a janky ass solution
-                if new_cursor_pos_x == old_cursor_pos_x && new_cursor_pos_y == old_cursor_pos_y {
-                    continue;
-                }
+            match receiver.next_event() {
+                Event::MouseMoveRelative { x, y } => {
+                    // TODO janky ass fix for apps like Flow Launcher since MouseMoveRelative can
+                    // be sent when the foreground window changes, even if cursor position hasn't
+                    if (x, y) == old_cursor_pos {
+                        continue;
+                    } else {
+                        old_cursor_pos = (x, y);
+                    }
 
-                old_cursor_pos_x = new_cursor_pos_x;
-                old_cursor_pos_y = new_cursor_pos_y;
+                    // check if the mouse is being pressed (like when resizing a window)
+                    if is_mouse_down {
+                        continue;
+                    }
 
-                if let (Ok(cursor_pos_hwnd), Ok(foreground_hwnd)) =
-                    (window_at_cursor_pos(), foreground_window())
-                {
-                    if cursor_pos_hwnd != foreground_hwnd {
+                    if let (Ok(cursor_pos_hwnd), Ok(foreground_hwnd)) =
+                        (window_at_cursor_pos(), foreground_window())
+                    {
+                        if cursor_pos_hwnd == foreground_hwnd {
+                            continue;
+                        }
+
+                        let top_level_hwnd = match top_level_hwnd_cache.get(&cursor_pos_hwnd) {
+                            Some(hwnd) => *hwnd,
+                            None => match get_ancestor(cursor_pos_hwnd, GA_ROOT) {
+                                Ok(hwnd) => {
+                                    top_level_hwnd_cache.insert(cursor_pos_hwnd, hwnd);
+                                    hwnd
+                                }
+                                Err(e) => {
+                                    tracing::error!("could not get ancestor: {e}");
+                                    cursor_pos_hwnd
+                                }
+                            },
+                        };
+
+                        if top_level_hwnd == foreground_hwnd {
+                            continue;
+                        }
+
                         if let Some(paired_hwnd) = hwnd_pair_cache.get(&cursor_pos_hwnd) {
                             if foreground_hwnd == *paired_hwnd {
                                 tracing::trace!("hwnds {cursor_pos_hwnd} and {foreground_hwnd} are known to refer to the same application, skipping");
@@ -216,9 +238,19 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                             }
                         }
 
-                        // check if the foreground window is in the pause list (i.e. task switcher)
-                        if let Some(class) = foreground_class {
-                            if CLASS_PAUSELIST.contains(&class.as_str()) {
+                        if let (Some(cursor_pos_class), Some(foreground_class)) =
+                            (&cursor_pos_class, &foreground_class)
+                        {
+                            // check if the foreground window is in the pause list (i.e. task switcher)
+                            if CLASS_PAUSELIST.contains(&foreground_class.as_str()) {
+                                continue;
+                            }
+
+                            // steam fixes - populate the hwnd pair cache if necessary
+                            if cursor_pos_class == "Chrome_RenderWidgetHostHWND"
+                                && foreground_class == "SDL_app"
+                            {
+                                hwnd_pair_cache.insert(cursor_pos_hwnd, foreground_hwnd);
                                 continue;
                             }
                         }
@@ -239,37 +271,27 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                             // tiling window manager are eligible to be focused"
 
                             if let Ok(raw_hwnds) = std::fs::read_to_string(hwnds) {
-                                if let Ok(top_level_hwnd) = get_ancestor(cursor_pos_hwnd, GA_ROOT) {
-                                    if raw_hwnds.contains(&cursor_pos_hwnd.to_string())
-                                        || raw_hwnds.contains(&top_level_hwnd.to_string())
-                                    {
-                                        tracing::debug!(
-                                            "hwnd {cursor_pos_hwnd} was found in {}",
+                                if raw_hwnds.contains(&cursor_pos_hwnd.to_string())
+                                    || raw_hwnds.contains(&top_level_hwnd.to_string())
+                                {
+                                    tracing::debug!(
+                                            "hwnd {cursor_pos_hwnd} or {top_level_hwnd} was found in {}",
                                             hwnds.display()
                                         );
 
-                                        hwnd_pair_cache.insert(cursor_pos_hwnd, top_level_hwnd);
-                                        eligibility_cache.insert(cursor_pos_hwnd, true);
-                                        should_raise = true;
-                                    }
+                                    eligibility_cache.insert(cursor_pos_hwnd, true);
+                                    should_raise = true;
                                 }
+                                // gonna ignore the case where raw_hwnds doesn't contain either
+                                // hwnds in case there is some delay when writing to the file
                             }
                         } else {
                             // otherwise, do some tests
 
-                            // step one: traverse the window tree to get the top-level/parent hwnd
-                            // of the given cursor_pos_hwnd, and check its window styles
-                            let has_filtered_style = match get_ancestor(cursor_pos_hwnd, GA_ROOT) {
-                                Ok(hwnd) => {
-                                    // insert this pair because they refer to the same window
-                                    hwnd_pair_cache.insert(cursor_pos_hwnd, hwnd);
+                            // step one: test against known window styles
+                            let has_filtered_style = has_filtered_style(top_level_hwnd);
 
-                                    has_filtered_style(hwnd)
-                                }
-                                Err(_) => true,
-                            };
-
-                            // step two: test against known classes in the ignore list
+                            // step two: test against known classes
                             let is_in_ignore_list = match cursor_pos_class {
                                 Some(class) => CLASS_IGNORELIST.contains(&class.as_str()),
                                 None => true,
@@ -277,27 +299,30 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
 
                             let is_eligible = !has_filtered_style && !is_in_ignore_list;
                             eligibility_cache.insert(cursor_pos_hwnd, is_eligible);
+                            should_raise = is_eligible;
                         }
 
                         if should_raise {
-                            // get the top-level window under the cursor
-                            if let Some(top_level_hwnd) = hwnd_pair_cache.get(&cursor_pos_hwnd) {
-                                match raise_and_focus_window(*top_level_hwnd) {
-                                    Ok(_) => {
-                                        tracing::info!(
+                            match raise_and_focus_window(top_level_hwnd) {
+                                Ok(_) => {
+                                    tracing::info!(
                                             "raised hwnd: {top_level_hwnd:#x}; cursor_pos_hwnd: {cursor_pos_hwnd:#x}"
                                         );
-                                    }
-                                    Err(error) => {
-                                        tracing::error!(
-                                            "failed to raise hwnd {top_level_hwnd:#x}: {error}"
-                                        );
-                                    }
+                                }
+                                Err(error) => {
+                                    tracing::error!(
+                                        "failed to raise hwnd {top_level_hwnd:#x}: {error}"
+                                    );
                                 }
                             }
                         }
                     }
                 }
+                Event::MouseButton { action, .. } => match action {
+                    Action::Press => is_mouse_down = true,
+                    Action::Release => is_mouse_down = false,
+                },
+                _ => {}
             }
         }
     });
