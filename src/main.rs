@@ -2,6 +2,7 @@ use clap::Parser;
 use color_eyre::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::time::Duration;
 use std::time::Instant;
 use windows::core::Result as WindowsCrateResult;
@@ -31,20 +32,26 @@ use winput::message_loop;
 use winput::message_loop::Event;
 use winput::Action;
 
-// ignore cursor_pos_hwnd if it is one of these classes
-const CLASS_IGNORELIST: [&str; 5] = [
-    "SHELLDLL_DefView",           // desktop window
-    "Shell_TrayWnd",              // tray
-    "TrayNotifyWnd",              // tray
-    "MSTaskSwWClass",             // start bar icons
-    "Windows.UI.Core.CoreWindow", // start menu
-];
+// do not raise any windows if either cursor_pos_hwnd or foreground_hwnd is one of these classes
+static CLASS_IGNORELIST: LazyLock<Vec<(&str, MatchStrategy)>> = LazyLock::new(|| {
+    Vec::from([
+        ("SHELLDLL_DefView", MatchStrategy::Equals),
+        ("Shell_TrayWnd", MatchStrategy::Equals),
+        ("TrayNotifyWnd", MatchStrategy::Equals),
+        ("MSTaskSwWClass", MatchStrategy::Equals),
+        ("Windows.UI.Core.CoreWindow", MatchStrategy::Equals),
+        ("XamlExplorerHostIslandWindow", MatchStrategy::Equals),
+        ("ForegroundStaging", MatchStrategy::Equals),
+        ("Flow.Launcher", MatchStrategy::Contains),
+        ("PowerToys.PowerLauncher", MatchStrategy::Contains),
+    ])
+});
 
-// prevent masir from raising any windows when the foreground window is one of these classes
-const CLASS_PAUSELIST: [&str; 2] = [
-    "XamlExplorerHostIslandWindow", // task switcher
-    "ForegroundStaging",            // also task switcher
-];
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum MatchStrategy {
+    Contains,
+    Equals,
+}
 
 #[derive(Parser)]
 #[clap(author, about, version)]
@@ -139,7 +146,6 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
         let mut cache_instantiation_time = Instant::now();
         let max_cache_age = Duration::from_secs(60) * 10; // 10 minutes
 
-        let mut old_cursor_pos = (0, 0);
         let mut is_mouse_down = false;
 
         loop {
@@ -156,15 +162,7 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
             }
 
             match receiver.next_event() {
-                Event::MouseMoveRelative { x, y } => {
-                    // TODO janky ass fix for apps like Flow Launcher since MouseMoveRelative can
-                    // be sent when the foreground window changes, even if cursor position hasn't
-                    if (x, y) == old_cursor_pos {
-                        continue;
-                    } else {
-                        old_cursor_pos = (x, y);
-                    }
-
+                Event::MouseMoveRelative { .. } => {
                     // check if the mouse is being pressed (like when resizing a window)
                     if is_mouse_down {
                         continue;
@@ -196,7 +194,7 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                         }
 
                         if let Some(paired_hwnd) = hwnd_pair_cache.get(&cursor_pos_hwnd) {
-                            if foreground_hwnd == *paired_hwnd {
+                            if *paired_hwnd == foreground_hwnd {
                                 tracing::trace!("hwnds {cursor_pos_hwnd} and {foreground_hwnd} are known to refer to the same application, skipping");
                                 continue;
                             }
@@ -241,11 +239,6 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                         if let (Some(cursor_pos_class), Some(foreground_class)) =
                             (&cursor_pos_class, &foreground_class)
                         {
-                            // check if the foreground window is in the pause list (i.e. task switcher)
-                            if CLASS_PAUSELIST.contains(&foreground_class.as_str()) {
-                                continue;
-                            }
-
                             // steam fixes - populate the hwnd pair cache if necessary
                             if cursor_pos_class == "Chrome_RenderWidgetHostHWND"
                                 && foreground_class == "SDL_app"
@@ -255,12 +248,15 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                             }
                         }
 
-                        // check our eligibility cache
-                        if let Some(eligible) = eligibility_cache.get(&cursor_pos_hwnd) {
-                            if *eligible {
+                        // check our eligibility caches
+                        if let (Some(cursor_pos_eligible), Some(foreground_eligible)) = (
+                            eligibility_cache.get(&cursor_pos_hwnd),
+                            eligibility_cache.get(&foreground_hwnd),
+                        ) {
+                            if *cursor_pos_eligible && *foreground_eligible {
                                 should_raise = true;
                                 tracing::debug!(
-                                    "hwnd {cursor_pos_hwnd} was found as eligible in the cache"
+                                    "hwnds {cursor_pos_hwnd} and {foreground_hwnd} were found as eligible in the cache"
                                 );
                             }
                         } else if let Some(hwnds) = &hwnds {
@@ -271,35 +267,70 @@ pub fn listen_for_movements(hwnds: Option<PathBuf>) {
                             // tiling window manager are eligible to be focused"
 
                             if let Ok(raw_hwnds) = std::fs::read_to_string(hwnds) {
-                                if raw_hwnds.contains(&cursor_pos_hwnd.to_string())
-                                    || raw_hwnds.contains(&top_level_hwnd.to_string())
-                                {
-                                    tracing::debug!(
-                                            "hwnd {cursor_pos_hwnd} or {top_level_hwnd} was found in {}",
-                                            hwnds.display()
-                                        );
+                                let mut cursor_pos_is_eligible;
+                                let mut foreground_is_eligible;
 
-                                    eligibility_cache.insert(cursor_pos_hwnd, true);
-                                    should_raise = true;
+                                // step one: test against the hwnds in the twm hwnds file
+                                cursor_pos_is_eligible = raw_hwnds
+                                    .contains(&cursor_pos_hwnd.to_string())
+                                    || raw_hwnds.contains(&top_level_hwnd.to_string());
+                                foreground_is_eligible =
+                                    raw_hwnds.contains(&foreground_hwnd.to_string());
+
+                                // step two: test against known classes
+                                if let (Some(cursor_pos_class), Some(foreground_class)) =
+                                    (&cursor_pos_class, &foreground_class)
+                                {
+                                    for (class, strategy) in CLASS_IGNORELIST.iter() {
+                                        let cursor_pos_has_match =
+                                            has_match(cursor_pos_class, class, strategy);
+                                        let foreground_has_match =
+                                            has_match(foreground_class, class, strategy);
+
+                                        cursor_pos_is_eligible &= !cursor_pos_has_match;
+                                        foreground_is_eligible &= !foreground_has_match;
+                                    }
                                 }
-                                // gonna ignore the case where raw_hwnds doesn't contain either
-                                // hwnds in case there is some delay when writing to the file
+
+                                // TODO right now we just ignore the non-eligible case in case
+                                // there is a delay in writing to the twm hwnds file
+                                if cursor_pos_is_eligible {
+                                    eligibility_cache.insert(cursor_pos_hwnd, true);
+                                }
+                                if foreground_is_eligible {
+                                    eligibility_cache.insert(foreground_hwnd, true);
+                                }
+
+                                should_raise = cursor_pos_is_eligible && foreground_is_eligible;
                             }
                         } else {
                             // otherwise, do some tests
+                            let mut cursor_pos_is_eligible;
+                            let mut foreground_is_eligible;
 
                             // step one: test against known window styles
-                            let has_filtered_style = has_filtered_style(top_level_hwnd);
+                            cursor_pos_is_eligible = !has_filtered_style(top_level_hwnd);
+                            foreground_is_eligible = !has_filtered_style(foreground_hwnd);
 
                             // step two: test against known classes
-                            let is_in_ignore_list = match cursor_pos_class {
-                                Some(class) => CLASS_IGNORELIST.contains(&class.as_str()),
-                                None => true,
-                            };
+                            if let (Some(cursor_pos_class), Some(foreground_class)) =
+                                (&cursor_pos_class, &foreground_class)
+                            {
+                                for (class, strategy) in CLASS_IGNORELIST.iter() {
+                                    let cursor_pos_has_match =
+                                        has_match(cursor_pos_class, class, strategy);
+                                    let foreground_has_match =
+                                        has_match(foreground_class, class, strategy);
 
-                            let is_eligible = !has_filtered_style && !is_in_ignore_list;
-                            eligibility_cache.insert(cursor_pos_hwnd, is_eligible);
-                            should_raise = is_eligible;
+                                    cursor_pos_is_eligible &= !cursor_pos_has_match;
+                                    foreground_is_eligible &= !foreground_has_match;
+                                }
+                            }
+
+                            eligibility_cache.insert(cursor_pos_hwnd, cursor_pos_is_eligible);
+                            eligibility_cache.insert(foreground_hwnd, foreground_is_eligible);
+
+                            should_raise = cursor_pos_is_eligible && foreground_is_eligible;
                         }
 
                         if should_raise {
@@ -397,6 +428,13 @@ impl<T> ProcessWindowsCrateResult<T> for WindowsCrateResult<T> {
             Ok(value) => Ok(value),
             Err(error) => Err(error.into()),
         }
+    }
+}
+
+fn has_match(class1: &str, class2: &str, strategy: &MatchStrategy) -> bool {
+    match strategy {
+        MatchStrategy::Equals => class1 == class2,
+        MatchStrategy::Contains => class1.contains(class2),
     }
 }
 
