@@ -35,13 +35,13 @@ use winput::Action;
 // do not raise any windows if either cursor_pos_hwnd or foreground_hwnd is one of these classes
 static CLASS_IGNORELIST: LazyLock<Vec<(&str, MatchStrategy)>> = LazyLock::new(|| {
     Vec::from([
-        ("SHELLDLL_DefView", MatchStrategy::Equals),
-        ("Shell_TrayWnd", MatchStrategy::Equals),
-        ("TrayNotifyWnd", MatchStrategy::Equals),
-        ("MSTaskSwWClass", MatchStrategy::Equals),
-        ("Windows.UI.Core.CoreWindow", MatchStrategy::Equals),
-        ("XamlExplorerHostIslandWindow", MatchStrategy::Equals),
-        ("ForegroundStaging", MatchStrategy::Equals),
+        ("SHELLDLL_DefView", MatchStrategy::Equals), // desktop window
+        ("Shell_TrayWnd", MatchStrategy::Equals),    // tray
+        ("TrayNotifyWnd", MatchStrategy::Equals),    // tray
+        ("MSTaskSwWClass", MatchStrategy::Equals),   // start bar icons
+        ("Windows.UI.Core.CoreWindow", MatchStrategy::Equals), // start menu
+        ("XamlExplorerHostIslandWindow", MatchStrategy::Equals), // task switcher
+        ("ForegroundStaging", MatchStrategy::Equals), // also task switcher
         ("Flow.Launcher", MatchStrategy::Contains),
         ("PowerToys.PowerLauncher", MatchStrategy::Contains),
     ])
