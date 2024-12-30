@@ -2,7 +2,6 @@ use clap::Parser;
 use color_eyre::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::LazyLock;
 use std::time::Duration;
 use std::time::Instant;
 use windows::core::Result as WindowsCrateResult;
@@ -17,38 +16,31 @@ use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 use windows::Win32::UI::WindowsAndMessaging::GetWindowLongW;
 use windows::Win32::UI::WindowsAndMessaging::RealGetWindowClassW;
 use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
-use windows::Win32::UI::WindowsAndMessaging::SetWindowPos;
 use windows::Win32::UI::WindowsAndMessaging::WindowFromPoint;
 use windows::Win32::UI::WindowsAndMessaging::GA_ROOT;
 use windows::Win32::UI::WindowsAndMessaging::GET_ANCESTOR_FLAGS;
 use windows::Win32::UI::WindowsAndMessaging::GWL_EXSTYLE;
-use windows::Win32::UI::WindowsAndMessaging::HWND_TOP;
-use windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE;
-use windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE;
-use windows::Win32::UI::WindowsAndMessaging::SWP_SHOWWINDOW;
+use windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE;
 use windows::Win32::UI::WindowsAndMessaging::WS_EX_NOACTIVATE;
 use windows::Win32::UI::WindowsAndMessaging::WS_EX_TOOLWINDOW;
 use winput::message_loop;
 use winput::message_loop::Event;
 use winput::Action;
 
-// do not raise any windows if either cursor_root_hwnd or foreground_hwnd is one of these classes
-static CLASS_IGNORELIST: LazyLock<Vec<(&str, MatchStrategy)>> = LazyLock::new(|| {
-    Vec::from([
-        ("SHELLDLL_DefView", MatchStrategy::Equals), // desktop window
-        ("Shell_TrayWnd", MatchStrategy::Equals),    // tray
-        ("TrayNotifyWnd", MatchStrategy::Equals),    // tray
-        ("MSTaskSwWClass", MatchStrategy::Equals),   // start bar icons
-        ("Windows.UI.Core.CoreWindow", MatchStrategy::Equals), // start menu
-        ("XamlExplorerHostIslandWindow", MatchStrategy::Equals), // task switcher
-        ("ForegroundStaging", MatchStrategy::Equals), // also task switcher
-        ("Flow.Launcher", MatchStrategy::Contains),
-        ("PowerToys.PowerLauncher", MatchStrategy::Contains),
-    ])
-});
+const CLASS_IGNORELIST: [(&str, MatchingStrategy); 9] = [
+    ("SHELLDLL_DefView", MatchingStrategy::Equals), // desktop window
+    ("Shell_TrayWnd", MatchingStrategy::Equals),    // tray
+    ("TrayNotifyWnd", MatchingStrategy::Equals),    // tray
+    ("MSTaskSwWClass", MatchingStrategy::Equals),   // start bar icons
+    ("Windows.UI.Core.CoreWindow", MatchingStrategy::Equals), // start menu
+    ("XamlExplorerHostIslandWindow", MatchingStrategy::Equals), // task switcher
+    ("ForegroundStaging", MatchingStrategy::Equals), // also task switcher
+    ("Flow.Launcher", MatchingStrategy::Contains),
+    ("PowerToys.PowerLauncher", MatchingStrategy::Contains),
+];
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum MatchStrategy {
+#[derive(Debug, PartialEq, Eq)]
+enum MatchingStrategy {
     Contains,
     Equals,
 }
@@ -428,17 +420,21 @@ impl<T> ProcessWindowsCrateResult<T> for WindowsCrateResult<T> {
     }
 }
 
-fn has_match(str_1: &str, str_2: &str, strategy: &MatchStrategy) -> bool {
-    match strategy {
-        MatchStrategy::Equals => str_1 == str_2,
-        MatchStrategy::Contains => str_1.contains(str_2),
+fn has_match(str1: &str, str2: &str, matching_strategy: &MatchingStrategy) -> bool {
+    match matching_strategy {
+        MatchingStrategy::Equals => str1 == str2,
+        MatchingStrategy::Contains => str1.contains(str2),
     }
 }
 
-fn has_filtered_style(hwnd: isize) -> bool {
-    let ex_style = unsafe { GetWindowLongW(HWND(as_ptr!(hwnd)), GWL_EXSTYLE) as u32 };
+fn get_window_ex_style(hwnd: isize) -> WINDOW_EX_STYLE {
+    unsafe { WINDOW_EX_STYLE(GetWindowLongW(HWND(as_ptr!(hwnd)), GWL_EXSTYLE) as u32) }
+}
 
-    ex_style & WS_EX_TOOLWINDOW.0 != 0 || ex_style & WS_EX_NOACTIVATE.0 != 0
+fn has_filtered_style(hwnd: isize) -> bool {
+    let ex_style = get_window_ex_style(hwnd);
+
+    ex_style.contains(WS_EX_TOOLWINDOW) || ex_style.contains(WS_EX_NOACTIVATE)
 }
 
 fn get_ancestor(hwnd: isize, gaflags: GET_ANCESTOR_FLAGS) -> Result<isize> {
@@ -476,16 +472,6 @@ fn raise_and_focus_window(hwnd: isize) -> Result<()> {
         SendInput(&event, size_of::<INPUT>() as i32);
         // Error ignored, as the operation is not always necessary.
 
-        let _ = SetWindowPos(
-            HWND(as_ptr!(hwnd)),
-            HWND_TOP,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
-        )
-        .process();
         SetForegroundWindow(HWND(as_ptr!(hwnd)))
     }
     .ok()
